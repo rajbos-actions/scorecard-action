@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+// Package signing provides functionality to sign and upload results to the Scorecard API.
 package signing
 
 import (
@@ -23,14 +24,16 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
 	"time"
 
-	sigOpts "github.com/sigstore/cosign/cmd/cosign/cli/options"
-	"github.com/sigstore/cosign/cmd/cosign/cli/sign"
+	sigOpts "github.com/sigstore/cosign/v2/cmd/cosign/cli/options"
+	"github.com/sigstore/cosign/v2/cmd/cosign/cli/sign"
+	"github.com/sigstore/cosign/v2/pkg/cosign"
 
 	"github.com/ossf/scorecard-action/entrypoint"
 	"github.com/ossf/scorecard-action/options"
@@ -39,11 +42,19 @@ import (
 var (
 	errorEmptyToken   = errors.New("error token empty")
 	errorInvalidToken = errors.New("invalid token")
+
+	// backoff schedule for interactions with cosign/rekor and our web API.
+	backoffSchedule = []time.Duration{
+		1 * time.Second,
+		3 * time.Second,
+		10 * time.Second,
+	}
 )
 
 // Signing is a signing structure.
 type Signing struct {
-	token string
+	token          string
+	rekorTlogIndex int64
 }
 
 // New creates a new Signing instance.
@@ -62,10 +73,6 @@ func New(token string) (*Signing, error) {
 		return nil, fmt.Errorf("error setting GITHUB_TOKEN env var: %w", err)
 	}
 
-	if err := os.Setenv("COSIGN_EXPERIMENTAL", "true"); err != nil {
-		return nil, fmt.Errorf("error setting COSIGN_EXPERIMENTAL env var: %w", err)
-	}
-
 	return &Signing{
 		token: token,
 	}, nil
@@ -73,22 +80,48 @@ func New(token string) (*Signing, error) {
 
 // SignScorecardResult signs the results file and uploads the attestation to the Rekor transparency log.
 func (s *Signing) SignScorecardResult(scorecardResultsFile string) error {
+	f, err := os.CreateTemp("", "bundle")
+	if err != nil {
+		return fmt.Errorf("creating temporary bundle file: %w", err)
+	}
+	bundlePath := f.Name()
+	f.Close()
+	defer os.Remove(bundlePath) // clean up
+
 	// Prepare settings for SignBlobCmd.
 	rootOpts := &sigOpts.RootOptions{Timeout: sigOpts.DefaultTimeout} // Just the timeout.
 	keyOpts := sigOpts.KeyOpts{
-		FulcioURL:    sigOpts.DefaultFulcioURL,     // Signing certificate provider.
-		RekorURL:     sigOpts.DefaultRekorURL,      // Transparency log.
-		OIDCIssuer:   sigOpts.DefaultOIDCIssuerURL, // OIDC provider to get ID token to auth for Fulcio.
-		OIDCClientID: "sigstore",
+		FulcioURL:        sigOpts.DefaultFulcioURL,     // Signing certificate provider.
+		RekorURL:         sigOpts.DefaultRekorURL,      // Transparency log.
+		OIDCIssuer:       sigOpts.DefaultOIDCIssuerURL, // OIDC provider to get ID token to auth for Fulcio.
+		OIDCClientID:     "sigstore",
+		SkipConfirmation: true, // skip cosign's privacy confirmation prompt as we run non-interactively
+		BundlePath:       bundlePath,
 	}
-	regOpts := sigOpts.RegistryOptions{} // Not necessary so we leave blank.
 
-	// This command will use the provided OIDCIssuer to authenticate into Fulcio, which will generate the
-	// signing certificate on the scorecard result. This attestation is then uploaded to the Rekor transparency log.
-	// The output bytes (signature) and certificate are discarded since verification can be done with just the payload.
-	if _, err := sign.SignBlobCmd(rootOpts, keyOpts, regOpts, scorecardResultsFile, true, "", ""); err != nil {
+	for _, backoff := range backoffSchedule {
+		// This command will use the provided OIDCIssuer to authenticate into Fulcio, which will generate the
+		// signing certificate on the scorecard result. This attestation is then uploaded to the Rekor transparency log.
+		// The output bytes (signature) and certificate are discarded since verification can be done with just the payload.
+		_, err = sign.SignBlobCmd(rootOpts, keyOpts, scorecardResultsFile, true, "", "", true)
+		if err == nil {
+			break
+		}
+		log.Printf("error signing scorecard results: %v\n", err)
+		log.Printf("retrying in %v...\n", backoff)
+		time.Sleep(backoff)
+	}
+
+	// retries failed
+	if err != nil {
 		return fmt.Errorf("error signing payload: %w", err)
 	}
+
+	rekorTlogIndex, err := extractTlogIndex(bundlePath)
+	if err != nil {
+		return err
+	}
+	s.rekorTlogIndex = rekorTlogIndex
 
 	return nil
 }
@@ -126,10 +159,12 @@ func (s *Signing) ProcessSignature(jsonPayload []byte, repoName, repoRef string)
 		Result      string `json:"result"`
 		Branch      string `json:"branch"`
 		AccessToken string `json:"accessToken"`
+		TlogIndex   int64  `json:"tlogIndex"`
 	}{
 		Result:      string(jsonPayload),
 		Branch:      repoRef,
 		AccessToken: s.token,
+		TlogIndex:   s.rekorTlogIndex,
 	}
 
 	payloadBytes, err := json.Marshal(resultsPayload)
@@ -137,15 +172,34 @@ func (s *Signing) ProcessSignature(jsonPayload []byte, repoName, repoRef string)
 		return fmt.Errorf("marshalling json results: %w", err)
 	}
 
-	// Call scorecard-webapp-api to process and upload signature.
-	// Setup HTTP request and context.
 	apiURL := os.Getenv(options.EnvInputInternalPublishBaseURL)
 	rawURL := fmt.Sprintf("%s/projects/github.com/%s", apiURL, repoName)
-	parsedURL, err := url.Parse(rawURL)
+	postURL, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("parsing Scorecard API endpoint: %w", err)
 	}
-	req, err := http.NewRequest("POST", parsedURL.String(), bytes.NewBuffer(payloadBytes))
+
+	for _, backoff := range backoffSchedule {
+		// Call scorecard-webapp-api to process and upload signature.
+		err = postResults(postURL, payloadBytes)
+		if err == nil {
+			break
+		}
+		log.Printf("error sending scorecard results to webapp: %v\n", err)
+		log.Printf("retrying in %v...\n", backoff)
+		time.Sleep(backoff)
+	}
+
+	// retries failed
+	if err != nil {
+		return fmt.Errorf("error sending scorecard results to webapp: %w", err)
+	}
+
+	return nil
+}
+
+func postResults(endpoint *url.URL, payload []byte) error {
+	req, err := http.NewRequest("POST", endpoint.String(), bytes.NewBuffer(payload))
 	if err != nil {
 		return fmt.Errorf("creating HTTP request: %w", err)
 	}
@@ -172,4 +226,17 @@ func (s *Signing) ProcessSignature(jsonPayload []byte, repoName, repoRef string)
 	}
 
 	return nil
+}
+
+func extractTlogIndex(bundlePath string) (int64, error) {
+	contents, err := os.ReadFile(bundlePath)
+	if err != nil {
+		return 0, fmt.Errorf("reading cosign bundle file: %w", err)
+	}
+	var payload cosign.LocalSignedPayload
+	err = json.Unmarshal(contents, &payload)
+	if err != nil || payload.Bundle == nil {
+		return 0, fmt.Errorf("invalid cosign bundle file: %w", err)
+	}
+	return payload.Bundle.Payload.LogIndex, nil
 }

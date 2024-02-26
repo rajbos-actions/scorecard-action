@@ -10,23 +10,13 @@ The Scorecards GitHub Action is free for all public repositories. Private reposi
 
 Starting from scorecard-action:v2, `GITHUB_TOKEN` permissions or job permissions needs to include
 `id-token: write` for `publish_results: true`. This is needed to access GitHub's
-OIDC token which verifies the authenticity of the result when publishing it.
+OIDC token which verifies the authenticity of the result when publishing it. See details [here](#publishing-results)
 
-scorecard-action:v2 has a new requirement for the job running the ossf/scorecard-action step. The steps running in this job must belong to this approved list of GitHub actions: 
-- "actions/checkout" 
-- "actions/upload-artifact"
-- "github/codeql-action/upload-sarif"
-- "ossf/scorecard-action"
-
-If you are using custom steps in the job, it may fail.
-We understand that this is restrictive, but currently it's necessary to ensure the integrity of the results that we publish, since GitHub workflow steps run in the same environment as the job they belong to. 
-If possible, we will work on making this feature more flexible so we can drop this requirement in the future.  
+If publishing results, scorecard-action:v2 also imposes new requirements on both the workflow and the job running the `ossf/scorecard-action` step. For full details see [here](#workflow-restrictions). 
 ________
-[Personal Access Token (PAT) Requirements and Risks](#personal-access-token-pat-requirements-and-risks)
-
-[Installation](#installation) 
+[Installation](#installation)
 - [Workflow Setup](#workflow-setup-required)
-- [Authentication](#authentication-with-pat-optional)
+- [Authentication](#authentication-with-fine-grained-pat-optional)
 
 [View Results](#view-results)
 - [REST API](#rest-api)
@@ -38,8 +28,11 @@ ________
 [Manual Action Setup](#manual-action-setup)
 - [Inputs](#inputs)
 - [Publishing Results](#publishing-results)
+- [Workflow Restrictions](#workflow-restrictions)
 - [Uploading Artifacts](#uploading-artifacts)
 - [Workflow Example](#workflow-example)
+
+[Reporting vulnerabilities](#reporting-vulnerabilities)
 ________
 
 The following GitHub triggers are supported: `push`, `schedule` (default branch only).
@@ -50,89 +43,51 @@ Running the Scorecard action on a fork repository is not supported.
 
 GitHub Enterprise repositories are not supported.
 
-## Personal Access Token (PAT) Requirements and Risks
-
-Certain features require a Personal Access Token (PAT). 
-
--  Public repositories need a PAT to enable the
-    [Branch-Protection](https://github.com/ossf/scorecard/blob/main/docs/checks.md#branch-protection)
-    check. Without a PAT, Scorecards will run all checks except the
-    Branch-Protection check
--  Private repositories need a PAT to use any Scorecard Action functions
-
-Using a PAT introduces risks, however. Due to a limitation of the GitHub
-permission model, the PAT needs
-[write permission to the repository](https://docs.github.com/en/developers/apps/building-oauth-apps/scopes-for-oauth-apps#available-scopes)
-through the `repo` scope. **The PAT will be stored as a
-[GitHub encrypted secret](https://docs.github.com/en/actions/security-guides/encrypted-secrets)
-and be accessible by all the workflows and maintainers of a repository.**
-This means another maintainer on your project could potentially use the token to impersonate you. If there is an exploitable bug in a workflow with write permissions, an external contributor could potentially exploit it to extract the PAT.
-
-We recommend that you **do not use a PAT** unless you feel that the
-risks introduced are outweighed by the functionalities they support. 
-
 ## Installation
 
 ### Workflow Setup (Required)
-1) From your GitHub project's main page, click “Security” in the top ribbon. 
+1) From your GitHub project's main page, click “Security” in the top ribbon.
 
 ![image](/images/install01.png)
 
-2) Click “Set up Code Scanning.” 
+2) Select “Code scanning”.
 
 ![image](/images/install02.png)
 
-Note: if you have already configured other code scanning tools, your UI will look different than shown above. Instead, click "Code Scanning Alerts" on the left side of the page. 
-
-![image](/images/installb1.png)
-
-Then click "Add More Scanning Tools."
-
-![image](/images/installb2.png)
-
-3) Choose the "OSSF Scorecards supply-chain security analysis" from the list of workflows, and then click “set up this workflow.”
+3) Then click "Add tool".
 
 ![image](/images/install03.png)
 
-4) Commit the changes.
+4) Choose the "OSSF Scorecard" from the list of workflows, and then click “Configure”.
 
 ![image](/images/install04.png)
 
-### Authentication with PAT (optional)
-Create a Personal Access Token (PAT) for authentication and save the token value as a repository secret. Review [Personal Access Token (PAT) Requirements and Risks](#personal-access-token-pat-requirements-and-risks) before using a PAT.  
+5) Commit the changes.
 
-1. [Create a Personal Access Token](https://github.com/settings/tokens/new?scopes=public_repo,read:org,read:repo_hook,read:discussion) with the following read permissions:
-    - Note: `Token for OSSF Scorecard Action - myorg/myrepo` (Note: replace `myorg/myrepo` with the names of your organization and repository so you can keep track of your tokens.)
-    - Expiration: `No expiration`
-    - Scopes: 
-        * `repo > public_repo`                  Required to read [Branch-Protection](https://github.com/ossf/scorecard/blob/main/docs/checks.md#branch-protection) settings. **Note**: for private repositories, you need scope `repo`.
-        * `admin:org > read:org`                Optional: not used in current implementation.
-        * `admin:repo_hook > read:repo_hook`    Optional: needed for the experimental [Webhook](https://github.com/ossf/scorecard/blob/main/docs/checks.md#webhooks) check.
-        * `write:discussion > read:discussion`  Optional: not used in current implementation.
+![image](/images/install05.png)
 
-![image](/images/tokenscopes.png)
+### Authentication with Fine-grained PAT (optional)
+Scorecard can run successfully with the workflow's default `GITHUB_TOKEN`, which is our recommended approach.
+However, Scorecard Action requires additional permissions if you use GitHub's classic [Branch Protection](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches) settings and want to see it reflected in your results.
+You can read more about how to configure Scorecard Action for these cases [here](/docs/authentication/fine-grained-auth-token.md).
 
-2. Copy the token value. 
-
-3. [Create a new repository secret](https://docs.github.com/en/actions/security-guides/encrypted-secrets#creating-encrypted-secrets-for-a-repository) with the following settings (**Warning:** [GitHub encrypted secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets) are accessible by all the workflows and maintainers of a repository.):
-    - Name: `SCORECARD_TOKEN`
-    - Value: the value of the token created in step 1 above.
-
-4. (Optional) If you install Scorecard on a repository owned by an organization that uses [SAML SSO](https://docs.github.com/en/enterprise-cloud@latest/authentication/authenticating-with-saml-single-sign-on/about-authentication-with-saml-single-sign-on), be sure to [enable SSO](https://docs.github.com/en/enterprise-cloud@latest/authentication/authenticating-with-saml-single-sign-on/authorizing-a-personal-access-token-for-use-with-saml-single-sign-on) for your PAT token.
+GitHub's new [Repository Rules](https://docs.github.com/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets) are accessible to Scorecard Action with the workflow's default `GITHUB_TOKEN`. 
+We recommend new repositories use Repository Rules so they can be read with the default GitHub token. 
+Repositories that already use classic Branch Protection and wish to see their results without an admin token should consider migrating to Repository Rules.
 
 ## View Results
 
 The workflow is preconfigured to run on every repository contribution. After making a code change, you can view the results for the change either through the Scorecard Badge, Code Scanning Alerts or GitHub Workflow Runs.
 
 ### REST API
-Starting with scorecard-action:v2, users can use a REST API to query their latest run results. This requires setting [`publish_results: true`](https://github.com/ossf/scorecard/blob/d13ba3f3355b958d5d62edc47282a2e7ed9fa7c1/.github/workflows/scorecard-analysis.yml#L39) for the action and enabling [`id-token: write`](https://github.com/ossf/scorecard/blob/d13ba3f3355b958d5d62edc47282a2e7ed9fa7c1/.github/workflows/scorecard-analysis.yml#L22) permission for the job (needed to access GitHub OIDC token). The API is available here: https://api.securityscorecards.dev. 
+Starting with scorecard-action:v2, users can use a REST API to query their latest run results. This requires setting [`publish_results: true`](https://github.com/ossf/scorecard/blob/d13ba3f3355b958d5d62edc47282a2e7ed9fa7c1/.github/workflows/scorecard-analysis.yml#L39) for the action and enabling [`id-token: write`](https://github.com/ossf/scorecard/blob/d13ba3f3355b958d5d62edc47282a2e7ed9fa7c1/.github/workflows/scorecard-analysis.yml#L22) permission for the job (needed to access GitHub OIDC token). The API is available here: https://api.securityscorecards.dev.
 
 ### Scorecard Badge
 
 Starting with scorecard-action:v2, users can add a Scorecard Badge to their README to display the latest status of their Scorecard results. This requires setting [`publish_results: true`](https://github.com/ossf/scorecard/blob/d13ba3f3355b958d5d62edc47282a2e7ed9fa7c1/.github/workflows/scorecard-analysis.yml#L39) for the action and enabling [`id-token: write`](https://github.com/ossf/scorecard/blob/d13ba3f3355b958d5d62edc47282a2e7ed9fa7c1/.github/workflows/scorecard-analysis.yml#L22) permission for the job (needed to access GitHub OIDC token). The badge is updated on every run of scorecard-action and points to the latest result. To add a badge to your README, copy and paste the below line, and replace the {owner} and {repo} parts.
 
 ```
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/{owner}/{repo}/badge)](https://api.securityscorecards.dev/projects/github.com/{owner}/{repo})
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/{owner}/{repo}/badge)](https://securityscorecards.dev/viewer/?uri=github.com/{owner}/{repo})
 ```
 
 Once this badge is added, clicking on the badge will take users to the latest run result of Scorecard.
@@ -145,26 +100,24 @@ A list of results is accessible by going in the Security tab and clicking "Code 
 
 ![image](/images/remediation.png)
 
-### Verify Runs 
-The workflow is preconfigured to run on every repository contribution. 
+### Verify Runs
+The workflow is preconfigured to run on every repository contribution.
 
 To verify that the Action is running successfully, click the repository's Actions tab to see the status of all recent workflow runs. This tab will also show the logs, which can help you troubleshoot if the run failed.
 
 ![image](/images/actionconfirm.png)
 
-### Troubleshooting 
-If the run has failed, the most likely reason is an authentication failure. If you are running Scorecards on a private repository, confirm that the Personal Access Token is saved as an encrypted secret within the same repository (see [Authentication](#authentication)). In addition, provide the `repo` scope to your PAT. (The `repo > public_repo` scope only provides access to public repositories).
+### Troubleshooting
+If the run has failed, the most likely reason is an authentication failure. Confirm that the Personal Access Token is saved as an encrypted secret within the same repository (see [Authentication](#authentication)). Also confirm that the PAT is still valid and hasn't expired or been revoked.
 
-If you install Scorecards on a repository owned by an organization that uses [SAML SSO](https://docs.github.com/en/enterprise-cloud@latest/authentication/authenticating-with-saml-single-sign-on/about-authentication-with-saml-single-sign-on) or if you see `403 Resource protected by organization SAML enforcement` in the logs, be sure to [enable SSO](https://docs.github.com/en/enterprise-cloud@latest/authentication/authenticating-with-saml-single-sign-on/authorizing-a-personal-access-token-for-use-with-saml-single-sign-on) for your PAT token (see [Authentication](#authentication)).
-
-If you use a PAT saved as an encrypted secret and the run is still failing, confirm that you have not made any changes to the workflow yaml file that affected the syntax. Review the [workflow example](#workflow-example) and reset to the default values if necessary.
+If you have a valid PAT saved as an encrypted secret and the run is still failing, confirm that you have not made any changes to the workflow yaml file that affected the syntax. Review the [workflow example](#workflow-example) and reset to the default values if necessary.
 
 ## Manual Action Setup
-    
+
 If you prefer to manually set up the Scorecards GitHub Action, you will need to set up a [workflow file](https://docs.github.com/en/actions/learn-github-actions/workflow-syntax-for-github-actions).
 
 First, [create a new file](https://docs.github.com/en/repositories/working-with-files/managing-files/creating-new-files) in this location: `[yourrepo]/.github/workflows/scorecards.yml`. Then use the input values below.
- 
+
 
 ### Inputs
 
@@ -172,26 +125,49 @@ First, [create a new file](https://docs.github.com/en/repositories/working-with-
 | ----- | -------- | ----------- |
 | `result_file` | yes | The file that contains the results. |
 | `result_format` | yes | The format in which to store the results [json \| sarif]. For GitHub's scanning dashboard, select `sarif`. |
-| `repo_token` | no | PAT token with write repository access. Follow [these steps](#authentication-with-pat) to create it. |
-| `publish_results` | recommended | This will allow you to display a badge on your repository to show off your hard work (release scheduled for Q2'22). See details [here](#publishing-results).|
+| `repo_token` | no | PAT token with repository read access. Follow [these steps](/docs/authentication/fine-grained-auth-token.md) to create it. |
+| `publish_results` | recommended | This will allow you to display a badge on your repository to show off your hard work. See details [here](#publishing-results).|
 
 ### Publishing Results
-The Scorecard team runs a weekly scan of public GitHub repositories in order to track 
+The Scorecard team runs a weekly scan of public GitHub repositories in order to track
 the overall security health of the open source ecosystem. The results of the scans are [publicly
 available](https://github.com/ossf/scorecard#public-data).
-Setting `publish_results: true` replaces the results of the team's weekly scans with your own scan results, 
+Setting `publish_results: true` replaces the results of the team's weekly scans with your own scan results,
 helping us scale by cutting down on repeated workflows and GitHub API requests.
-This option is also needed to enable badges on the repository (release scheduled for Q2'22). 
+This option is also needed to enable badges on the repository.
+
+### Workflow Restrictions
+
+If [publishing results](#publishing-results), our API [enforces certain rules](https://github.com/ossf/scorecard-webapp/blob/9c2f66d5f6ff56ca4a4ac2fba6ec8dcc5379d31c/app/server/post_results.go#L184-L187) on the producing workflow, which may reject the results and cause the Scorecard Action run to fail. 
+We understand that this is restrictive, but currently it's necessary to ensure the integrity of our API dataset, since GitHub workflow steps run in the same environment as the job they belong to.
+If possible, we will work on making this feature more flexible so we can drop this requirement in the future.
+
+#### Global workflow restrictions
+
+* The workflow can't contain top level env vars or defaults.
+* No workflow level write permissions.
+* Only the job with `ossf/scorecard-action` can use `id-token: write` permissions.
+
+#### Restrictions on the job containing `ossf/scorecard-action`
+* No job level env vars or defaults.
+* No containers or services
+* The job should run on one of the [Ubuntu hosted runners](https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#choosing-github-hosted-runners)
+* The steps running in this job must belong to this approved list of GitHub actions.
+  * "actions/checkout"
+  * "actions/upload-artifact"
+  * "github/codeql-action/upload-sarif"
+  * "ossf/scorecard-action"
+  * "step-security/harden-runner"
 
 ### Uploading Artifacts
-The Scorecards Action uses the [artifact uploader action](https://github.com/actions/upload-artifact) to upload results in SARIF format to the Actions tab. These results are available to anybody for five days after the run to help with debugging. To disable the upload, comment out the `Upload Artifact` value in the Workflow Example. 
+The Scorecards Action uses the [artifact uploader action](https://github.com/actions/upload-artifact) to upload results in SARIF format to the Actions tab. These results are available to anybody for five days after the run to help with debugging. To disable the upload, comment out the `Upload Artifact` value in the Workflow Example.
 
-Note: if you disable this option, the results of the Scorecards Action run will be available only to maintainers (on the Security tab scanning dashboard). 
+Note: if you disable this option, the results of the Scorecards Action run will be only available to people with write access or more. You can find the results on the Security tab scanning dashboard).
 
 ### Workflow Example
 
 ```yml
-name: Scorecards supply-chain security
+name: Scorecard analysis workflow
 on:
   # Only the default branch is supported.
   branch_protection_rule:
@@ -206,31 +182,28 @@ permissions: read-all
 
 jobs:
   analysis:
-    name: Scorecards analysis
+    name: Scorecard analysis
     runs-on: ubuntu-latest
     permissions:
-      # Needed to upload the results to code-scanning dashboard.
+      # Needed if using Code scanning alerts
       security-events: write
-      # Used to receive a badge. (Upcoming feature)
+      # Needed for GitHub OIDC token if publish_results is true
       id-token: write
-      actions: read
-      contents: read
 
     steps:
       - name: "Checkout code"
-        uses: actions/checkout@a12a3943b4bdde767164f792f33f40b04645d846 # tag=v3.0.0
+        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
         with:
           persist-credentials: false
 
       - name: "Run analysis"
-        uses: ossf/scorecard-action@3e15ea8318eee9b333819ec77a36aca8d39df13e # tag=v1.1.1
+        uses: ossf/scorecard-action@80e868c13c90f172d68d1f4501dee99e2479f7af # v2.1.3
         with:
           results_file: results.sarif
           results_format: sarif
-          # (Optional) "write" PAT token. Uncomment the `repo_token` line below if:
+          # (Optional) fine-grained personal access token. Uncomment the `repo_token` line below if:
           # - you want to enable the Branch-Protection check on a *public* repository, or
-          # - you are installing Scorecards on a *private* repository
-          # To create the PAT, follow the steps in https://github.com/ossf/scorecard-action#authentication-with-pat.
+          # To create the PAT, follow the steps in https://github.com/ossf/scorecard-action#authentication-with-fine-grained-pat-optional.
           # repo_token: ${{ secrets.SCORECARD_TOKEN }}
 
           # Publish the results for public repositories to enable scorecard badges. For more details, see
@@ -242,15 +215,20 @@ jobs:
       # Upload the results as artifacts (optional). Commenting out will disable uploads of run results in SARIF
       # format to the repository Actions tab.
       - name: "Upload artifact"
-        uses: actions/upload-artifact@6673cd052c4cd6fcf4b4e6e60ea986c889389535 # tag=v3.0.0
+        uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
         with:
           name: SARIF file
           path: results.sarif
           retention-days: 5
 
-      # Upload the results to GitHub's code scanning dashboard.
-      - name: "Upload to code-scanning"
-        uses: github/codeql-action/upload-sarif@5f532563584d71fdef14ee64d17bafb34f751ce5 # tag=v1.0.26
+      # required for Code scanning alerts
+      - name: "Upload SARIF results to code scanning"
+        uses: github/codeql-action/upload-sarif@83f0fe6c4988d98a455712a27f0255212bba9bd4 # v2.3.6
         with:
           sarif_file: results.sarif
 ```
+
+## Reporting vulnerabilities
+
+If you find a vulnerability, please report it to us!
+See [SECURITY.md](./SECURITY.md) for more information.
